@@ -1,0 +1,247 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>いざ番設定判別</title>
+</head>
+<body style="font-family:sans-serif; padding:16px; max-width:600px; margin:auto;">
+
+<div>
+  <div>今回の上段ベルの間隔(G)</div>
+  <div style="margin-top:6px;">
+    <input id="input" type="number" min="1" style="width:100%; padding:10px; font-size:18px; box-sizing:border-box;">
+    
+    <div style="display:flex; gap:8px; margin-top:8px;">
+      <button onclick="loadData()" style="flex:1; padding:12px;">復元</button>
+      <button onclick="add()" style="flex:1; padding:12px;">記録</button>
+    </div>
+  </div>
+</div>
+
+<div style="margin-top:12px;">累計G: <span id="totalG">0</span></div>
+<div>平均出現率: <span id="avg">-</span></div>
+
+<hr>
+<div id="settings"></div>
+<hr>
+<div id="analysis"></div>
+
+<script>
+let history = [];
+const STORAGE_KEY = "izaban_history";
+
+const totalG = document.getElementById("totalG");
+const avg = document.getElementById("avg");
+const settings = document.getElementById("settings");
+const analysis = document.getElementById("analysis");
+const input = document.getElementById("input");
+
+/* 記録 */
+function add(){
+  const v = Number(input.value);
+  if(!Number.isFinite(v) || v <= 0){
+    input.value="";
+    return;
+  }
+  history.push(v);
+  input.value="";
+  saveDataSilent();
+  render();
+}
+
+/* 自動保存 */
+function saveDataSilent(){
+  localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify({history})
+  );
+}
+
+/* 復元 */
+function loadData(){
+  const data = localStorage.getItem(STORAGE_KEY);
+
+  if(!data){
+    alert("データなし");
+    return;
+  }
+
+  try{
+    const obj = JSON.parse(data);
+    history = obj.history || [];
+    render();
+    alert("復元しました");
+  }catch(e){
+    alert("復元失敗");
+  }
+}
+
+/* 88G以内連カウント */
+function buildStreaks(){
+  const result = [];
+  let cur = 0;
+  let prevWas89 = false;
+
+  for(let i=0;i<history.length;i++){
+    const x = history[i];
+
+    if(x >= 89){
+      if(cur > 0){
+        result.push(cur);
+        cur = 0;
+      }
+
+      if(i === 0 || prevWas89){
+        result.push(0);
+      }
+
+      prevWas89 = true;
+
+    }else{
+      cur++;
+      prevWas89 = false;
+    }
+  }
+
+  if(cur > 0){
+    result.push(cur);
+  }
+
+  return result;
+}
+
+/* 88G連判定 */
+function countTier(n){
+  const s = buildStreaks();
+
+  return {
+    success: s.filter(x => x >= n).length,
+    total: s.length
+  };
+}
+
+/* 理論スケール */
+function stepScaleTheory(actualTotal, baseNum, baseDen){
+  if(actualTotal <= baseDen){
+    return {
+      text: `${baseNum}/${baseDen}`,
+      num: baseNum
+    };
+  }
+
+  const step = Math.ceil(actualTotal / baseDen);
+
+  return {
+    text: `${baseNum * step}/${baseDen * step}`,
+    num: baseNum * step
+  };
+}
+
+/* 128Gハマリ */
+function calcHama(){
+  return history.filter(x => x >= 128).length;
+}
+
+/* 設定推定（上段ベル判定） */
+function calcSetting(){
+
+  const settingData = [
+    {label:"設定1", rate:74.9},
+    {label:"設定2", rate:74.5},
+    {label:"設定3", rate:72.7},
+    {label:"設定4", rate:64.0},
+    {label:"設定5", rate:60.1},
+    {label:"設定6", rate:58.0}
+  ];
+
+  let logs = settingData.map(s=>{
+    const p = 1/s.rate;
+
+    return history.reduce((sum,x)=>{
+      return sum + ((x-1)*Math.log(1-p)+Math.log(p));
+    },0);
+  });
+
+  const max = Math.max(...logs);
+  const exp = logs.map(v=>Math.exp(v-max));
+  const sum = exp.reduce((a,b)=>a+b,0);
+
+  const maxPct = history.length
+    ? Math.max(...exp.map(v=>v/sum*100))
+    : 0;
+
+  return settingData.map((s,i)=>{
+    const pct = history.length ? exp[i]/sum*100 : 0;
+    const isMax = pct === maxPct && history.length;
+
+    return `
+      <div>
+        ${s.label} (1/${s.rate.toFixed(1)}) :
+        <span style="
+          color:${isMax ? 'red':'black'};
+          font-weight:${isMax ? 'bold':'normal'};
+        ">
+          ${pct.toFixed(1)}%
+        </span>
+      </div>
+    `;
+  }).join("");
+}
+
+/* 表示 */
+function render(){
+  const sum = history.reduce((a,b)=>a+b,0);
+
+  totalG.textContent = history.length ? sum : 0;
+  avg.textContent = history.length
+    ? "1/" + (sum/history.length).toFixed(1)
+    : "-";
+
+  const s1 = countTier(1);
+  const s7 = countTier(7);
+  const s8 = countTier(8);
+
+  settings.innerHTML = calcSetting();
+
+  const hamaCount = calcHama();
+  const hamaTheory = stepScaleTheory(history.length,2,15);
+
+  const hamaNum =
+    (history.length > 0 && hamaCount <= hamaTheory.num)
+    ? `<span style="color:red;font-weight:bold">${hamaCount}</span>`
+    : `<span>${hamaCount}</span>`;
+
+  const s1Theory = stepScaleTheory(s1.total,3,4);
+  const s7Theory = stepScaleTheory(s7.total,2,15);
+  const s8Theory = stepScaleTheory(s8.total,1,10);
+
+  const s1Num =
+    (s1.success >= s1Theory.num)
+    ? `<span style="color:red;font-weight:bold">${s1.success}</span>`
+    : `<span>${s1.success}</span>`;
+
+  const s7Num =
+    (s7.success >= s7Theory.num)
+    ? `<span style="color:red;font-weight:bold">${s7.success}</span>`
+    : `<span>${s7.success}</span>`;
+
+  const s8Num =
+    (s8.success >= s8Theory.num)
+    ? `<span style="color:red;font-weight:bold">${s8.success}</span>`
+    : `<span>${s8.success}</span>`;
+
+  analysis.innerHTML = `
+    <div>128Gハマリ: ${hamaNum}/${history.length} (理論 ${hamaTheory.text})</div>
+    <hr>
+
+    <div>88G以内1連: ${s1Num}/${s1.total} (理論 ${s1Theory.text})</div>
+    <div>88G以内7連: ${s7Num}/${s7.total} (理論 ${s7Theory.text})</div>
+    <div>88G以内8連: ${s8Num}/${s8.total} (理論 ${s8Theory.text})</div>
+  `;
+}
+
+render();
+</script>
+</body>
+</html>
